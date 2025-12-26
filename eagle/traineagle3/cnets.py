@@ -30,6 +30,8 @@ from transformers.integrations.deepspeed import HfDeepSpeedConfig
 from transformers.activations import ACT2FN
 from transformers import AutoTokenizer
 from modeling_llama_kv import LlamaForCausalLM
+from modeling_qwen2_kv import Qwen2ForCausalLM
+from modeling_qwen3_kv import Qwen3ForCausalLM
 from configs import EConfig
 from safetensors import safe_open
 from datasets import load_dataset
@@ -478,25 +480,33 @@ def merge_dicts(dicts):
 
 
 class Model(nn.Module):
-    def __init__(self, config, ds_config, training_config, load_head=False, load_emb=True, path=None):
-        super().__init__() 
+    def __init__(self, config, ds_config, training_config, load_head=False, load_emb=True, path=None, model_type="qwen3"):
+        super().__init__()
         # self.layers = nn.ModuleList(
         #     [LlamaDecoderLayer(config, index=index) for index in range(config.num_hidden_layers)])
         self.train_config = training_config
+        self.model_type = model_type  # Store model_type for later use
         # Settng dschf to allow efficient ZeRO-3 usage between hf and ds.
         if ds_config is not None and ds_config["zero_optimization"]["stage"] == 3:
             dschf = HfDeepSpeedConfig(ds_config)
         else:
             dschf = None
         self.midlayer = LlamaDecoderLayeremb(config)
-        self.gradient_checkpointing = self.train_config.gradient_checkpointing
+        self.gradient_checkpointing = self.train_config.get("gradient_checkpoint", False) if isinstance(self.train_config, dict) else self.train_config.gradient_checkpointing
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.hidden_size = config.hidden_size
         self.draft_vocab_size = config.draft_vocab_size
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.length = 7
-        self.target_model = LlamaForCausalLM.from_pretrained(path, torch_dtype=torch.float16)
+
+        # Load target model based on model_type
+        if model_type == "qwen3":
+            self.target_model = Qwen3ForCausalLM.from_pretrained(path, torch_dtype=torch.bfloat16)
+        elif model_type == "qwen2":
+            self.target_model = Qwen2ForCausalLM.from_pretrained(path, torch_dtype=torch.bfloat16)
+        else:  # llama3
+            self.target_model = LlamaForCausalLM.from_pretrained(path, torch_dtype=torch.bfloat16)
         self.target_model.eval()
         self.fc=nn.Linear(self.hidden_size*3, self.hidden_size, bias=False)
         for param in self.target_model.parameters():
@@ -544,96 +554,123 @@ class Model(nn.Module):
             num_proc = 48
 
 
+            # Helper function for Qwen2/Qwen3 loss mask generation
+            def build_input_mask_qwen(tokenizer, messages):
+                """Build input_ids and loss_mask for Qwen2/Qwen3 models."""
+                all_input_ids = []
+                all_loss_mask = []
+                im_start = "<|im_start|>"
+                im_end = "<|im_end|>"
+
+                for i, msg in enumerate(messages):
+                    role = msg["role"]
+                    content = msg["content"]
+                    formatted = f"{im_start}{role}\n{content}{im_end}\n"
+                    tokens = tokenizer(formatted, add_special_tokens=(i==0)).input_ids
+
+                    if role == "assistant":
+                        header = f"{im_start}{role}\n"
+                        header_tokens = tokenizer(header, add_special_tokens=False).input_ids
+                        header_len = len(header_tokens)
+                        footer_len = 2
+                        content_len = len(tokens) - header_len - footer_len
+                        if content_len > 0:
+                            mask = [0] * header_len + [1] * content_len + [0] * footer_len
+                        else:
+                            mask = [0] * len(tokens)
+                        if len(mask) != len(tokens):
+                            mask = mask[:len(tokens)] if len(mask) > len(tokens) else mask + [0] * (len(tokens) - len(mask))
+                    else:
+                        mask = [0] * len(tokens)
+
+                    all_input_ids.extend(tokens)
+                    all_loss_mask.extend(mask)
+
+                return all_input_ids, all_loss_mask
+
             def preprocess_function(examples):
                 new_examples = {
-                    # "conversation": [],
                     "input_ids": [],
                     "loss_mask": []
                 }
+                model_type = self.model_type
+
                 for i in range(len(examples['id'])):
-                    messages = [
-                        {"role": "system",
-                         "content": "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."},
-                    ]
-                    convroles = ["user", "assistant"]
-                    roles = {"human": "user", "gpt": "assistant"}
-                    source = examples['conversations'][i]
-                    if not source:
+                    # Parse messages (support both ShareGPT and OpenAI format)
+                    if 'messages' in examples and examples['messages'][i]:
+                        messages = examples['messages'][i]
+                    elif 'conversations' in examples and examples['conversations'][i]:
+                        # Convert ShareGPT to OpenAI format
+                        roles = {"human": "user", "gpt": "assistant", "system": "system"}
+                        source = examples['conversations'][i]
+                        if not source:
+                            continue
+                        messages = []
+                        for conv in source:
+                            role = roles.get(conv.get("from", ""), None)
+                            if role:
+                                messages.append({"role": role, "content": conv.get("value", "")})
+                    else:
                         continue
-                    if roles[source[0]["from"]] != "user":
-                        # Skip the first one if it is not from human
-                        source = source[1:]
-                    for j, sentence in enumerate(source):
-                        role = roles[sentence["from"]]
-                        assert role == convroles[j % 2], f"{i}"
-                        # if sentence["from"]=="gpt":
-                        #     sentence["value"]=" "+sentence["value"]
-                        messages.append(
-                            {"role": role, "content": sentence["value"]}
-                        )
-                    conversation = tokenizer.apply_chat_template(
-                        messages,
-                        tokenize=False,
-                        add_generation_prompt=False,
-                    )
 
-                    if not tokenizer.pad_token_id:
-                        tokenizer.pad_token_id = tokenizer.unk_token_id
-
-                    input_ids = tokenizer(
-                        conversation,
-                        return_tensors="pt",
-                        add_special_tokens=False,
-                    ).input_ids[0]
-                    # When construct draft model vocab, 
-                    # filter out samples which is longer than max_len,
-                    # instead of truncating them.
-                    if len(input_ids) > self.train_config.max_len:
+                    if not messages:
                         continue
-                    loss_mask = torch.ones_like(input_ids)
-                    # print(i)
 
-                    sep = "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
-
-                    total_len = len(input_ids)
-
-                    sep2 = "<|eot_id|><|start_header_id|>user<|end_header_id|>"
-                    turns = conversation.split(sep2)
-
-                    turns[1] = turns[0] + sep2 + turns[1]
-                    turns = turns[1:]
-
-                    cur_len = 1
-                    loss_mask[:cur_len] = 0
-                    for i, turn in enumerate(turns):
-                        if turn == "":
-                            break
-                        turn_len = len(tokenizer(turn).input_ids)
-
-                        parts = turn.split(sep)
-                        if len(parts) != 2:
-                            break
-                        parts[0] += sep
-                        # "-2" is hardcoded for the Llama tokenizer to make the offset correct.
-                        instruction_len = len(tokenizer(parts[0]).input_ids) - 1
-
-                        # Ignore the user instructions
-                        if i == 0:
-                            loss_mask[cur_len: cur_len + instruction_len - 2] = 0
+                    # Add system prompt if not present
+                    if messages[0]["role"] != "system":
+                        if model_type in ["qwen2", "qwen3"]:
+                            system_prompt = "You are a helpful assistant."
                         else:
-                            loss_mask[cur_len - 3: cur_len + instruction_len + 1] = 0
-                        cur_len += turn_len
-                        if i != 0:
-                            cur_len += 3
-                        # cur_len+=2
+                            system_prompt = "You are a helpful, respectful and honest assistant."
+                        messages = [{"role": "system", "content": system_prompt}] + messages
 
-                        # if i != 0 and not tokenizer.legacy:
-                        #     # The legacy and non-legacy modes handle special tokens differently
-                        #     cur_len -= 1
+                    # Build input_ids and loss_mask based on model type
+                    if model_type in ["qwen2", "qwen3"]:
+                        input_ids_list, loss_mask_list = build_input_mask_qwen(tokenizer, messages)
+                        if len(input_ids_list) > self.train_config.max_len:
+                            continue
+                        if len(input_ids_list) == 0:
+                            continue
+                        input_ids = torch.tensor(input_ids_list)
+                        loss_mask = torch.tensor(loss_mask_list)
+                    else:
+                        # LLaMA3 format - use original string splitting approach
+                        conversation = tokenizer.apply_chat_template(
+                            messages, tokenize=False, add_generation_prompt=False
+                        )
+                        if not tokenizer.pad_token_id:
+                            tokenizer.pad_token_id = tokenizer.unk_token_id
+                        input_ids = tokenizer(conversation, return_tensors="pt", add_special_tokens=False).input_ids[0]
+                        if len(input_ids) > self.train_config.max_len:
+                            continue
+                        loss_mask = torch.ones_like(input_ids)
 
-                    loss_mask[cur_len:] = 0
+                        sep = "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+                        sep2 = "<|eot_id|><|start_header_id|>user<|end_header_id|>"
+                        turns = conversation.split(sep2)
+                        turns[1] = turns[0] + sep2 + turns[1]
+                        turns = turns[1:]
 
-                    # new_examples["conversation"].append(conversation)
+                        cur_len = 1
+                        loss_mask[:cur_len] = 0
+                        for idx, turn in enumerate(turns):
+                            if turn == "":
+                                break
+                            turn_len = len(tokenizer(turn).input_ids)
+                            parts = turn.split(sep)
+                            if len(parts) != 2:
+                                break
+                            parts[0] += sep
+                            instruction_len = len(tokenizer(parts[0]).input_ids) - 1
+                            if idx == 0:
+                                loss_mask[cur_len: cur_len + instruction_len - 2] = 0
+                            else:
+                                loss_mask[cur_len - 3: cur_len + instruction_len + 1] = 0
+                            cur_len += turn_len
+                            if idx != 0:
+                                cur_len += 3
+                        loss_mask[cur_len:] = 0
+
                     new_examples["input_ids"].append(input_ids[None, :])
                     new_examples["loss_mask"].append(loss_mask[None, :])
 
