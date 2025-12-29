@@ -581,6 +581,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
         for idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             if idx==len(self.layers)-3 or idx==len(self.layers)//2 or idx==2:
                 all_hidden_states += (hidden_states,)
+                
             past_key_value = (
                 past_key_values[idx] if past_key_values is not None else None
             )

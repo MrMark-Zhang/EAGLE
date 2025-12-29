@@ -144,18 +144,19 @@ def build_input_mask_qwen2(tokenizer, messages):
         tokens = tokenizer(formatted, add_special_tokens=(i==0)).input_ids
 
         if role == "assistant":
-            # Only compute loss on assistant content
-            # Header: <|im_start|>assistant\n
+            # Compute loss on assistant content and <|im_end|> token
+            # Header: <|im_start|>assistant\n (no loss)
             header = f"{im_start}{role}\n"
             header_tokens = tokenizer(header, add_special_tokens=False).input_ids
             header_len = len(header_tokens)
 
-            # Footer: <|im_end|>\n (typically 2 tokens)
-            footer_len = 2
-            content_len = len(tokens) - header_len - footer_len
+            # Footer: only final \n has no loss, <|im_end|> should have loss
+            # <|im_end|>\n is 2 tokens: [151645, 198]
+            footer_no_loss_len = 1  # only the final \n
+            content_and_im_end_len = len(tokens) - header_len - footer_no_loss_len
 
-            if content_len > 0:
-                mask = [0] * header_len + [1] * content_len + [0] * footer_len
+            if content_and_im_end_len > 0:
+                mask = [0] * header_len + [1] * content_and_im_end_len + [0] * footer_no_loss_len
             else:
                 mask = [0] * len(tokens)
 

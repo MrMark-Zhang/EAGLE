@@ -551,7 +551,7 @@ class Model(nn.Module):
             dataset = dataset['train']
             # dataset = dataset.select(range(96))
             original_columns1 = dataset.column_names
-            num_proc = 48
+            num_proc = 2
 
 
             # Helper function for Qwen2/Qwen3 loss mask generation
@@ -569,13 +569,14 @@ class Model(nn.Module):
                     tokens = tokenizer(formatted, add_special_tokens=(i==0)).input_ids
 
                     if role == "assistant":
+                        # Compute loss on assistant content and <|im_end|> token
                         header = f"{im_start}{role}\n"
                         header_tokens = tokenizer(header, add_special_tokens=False).input_ids
                         header_len = len(header_tokens)
-                        footer_len = 2
-                        content_len = len(tokens) - header_len - footer_len
-                        if content_len > 0:
-                            mask = [0] * header_len + [1] * content_len + [0] * footer_len
+                        footer_no_loss_len = 1  # only the final \n
+                        content_and_im_end_len = len(tokens) - header_len - footer_no_loss_len
+                        if content_and_im_end_len > 0:
+                            mask = [0] * header_len + [1] * content_and_im_end_len + [0] * footer_no_loss_len
                         else:
                             mask = [0] * len(tokens)
                         if len(mask) != len(tokens):
