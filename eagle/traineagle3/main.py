@@ -23,7 +23,7 @@ with open(deepspeed_config) as f:
     ds_config = json.load(f)
 train_config = {
     "bs": ds_config["train_micro_batch_size_per_gpu"],
-    "num_epochs": 2,
+    "num_epochs": 5,
     "num_workers": 2,
     "max_len": 2048,
     "config_path": "config.json",
@@ -83,10 +83,7 @@ def convert_sharegpt_to_openai(conversations):
 
 def get_default_system_prompt(model_type):
     """Get default system prompt for model type."""
-    if model_type in ["qwen2", "qwen3"]:
-        return "You are a helpful assistant."
-    else:  # llama3
-        return ("You are a helpful, respectful and honest assistant. "
+    return ("You are a helpful, respectful and honest assistant. "
                 "Always answer as helpfully as possible, while being safe. "
                 "Your answers should not include any harmful, unethical, racist, sexist, "
                 "toxic, dangerous, or illegal content. Please ensure that your responses "
@@ -232,7 +229,7 @@ def build_dataset_rank(
     ds = ds.shuffle(seed=42)
     ds1 = ds
     original_columns1 = ds1.column_names
-    num_proc = 8
+    num_proc = 16
 
     def preprocess_function(examples):
         """
@@ -368,8 +365,8 @@ world_size = deepspeed.comm.get_world_size()
 if global_rank == 0:
     import wandb
 
-    wandb.login(key="")
-    wandb.init(project="l382", entity="yuhui-li", config=ds_config)
+    # wandb.login(key="")
+    # wandb.init(project="l382", entity="yuhui-li", config=ds_config)
 
 os.makedirs(args.savedir, exist_ok=True)
 
@@ -437,7 +434,7 @@ for epoch in range(start_epoch, num_epochs):
                 logdict[f"train/ploss_{i}"] = plosses[i].item()
             for i in range(len(acces)):
                 logdict[f"train/acc_{i}"] = acces[i]
-            wandb.log(logdict)
+            # wandb.log(logdict)
         epoch_acces = [epoch_acces[i] + [acces[i]] for i in range(len(acces))]
         epoch_plosses = [epoch_plosses[i] + [plosses[i].item()] for i in range(len(plosses))]
 
@@ -447,7 +444,7 @@ for epoch in range(start_epoch, num_epochs):
         deepspeed.comm.all_reduce(acc_i, op=deepspeed.comm.ReduceOp.AVG)
         acc_i = acc_i.item()
         if global_rank == 0:
-            wandb.log({f"train/epochacc_{i}": acc_i})
+            # wandb.log({f"train/epochacc_{i}": acc_i})
             print(f"Train Epoch [{epoch + 1}/{num_epochs}], position {i},  Acc: {acc_i:.2f}")
 
     for i in range(len(epoch_plosses)):
@@ -455,7 +452,7 @@ for epoch in range(start_epoch, num_epochs):
         deepspeed.comm.all_reduce(loss_i, op=deepspeed.comm.ReduceOp.AVG)
         loss_i = loss_i.item()
         if global_rank == 0:
-            wandb.log({f"train/epochploss_{i}": loss_i})
+            # wandb.log({f"train/epochploss_{i}": loss_i})
             print(f"Train Epoch [{epoch + 1}/{num_epochs}], position {i}, pLoss: {loss_i:.2f}")
 
     epoch_acces = [[] for _ in range(model.length)]
@@ -475,7 +472,7 @@ for epoch in range(start_epoch, num_epochs):
         deepspeed.comm.all_reduce(acc_i, op=deepspeed.comm.ReduceOp.AVG)
         acc_i = acc_i.item()
         if global_rank == 0:
-            wandb.log({f"test/epochacc_{i}": acc_i})
+            # wandb.log({f"test/epochacc_{i}": acc_i})
             print(f"Test Epoch [{epoch + 1}/{num_epochs}], position {i},  Acc: {acc_i:.2f}")
 
     for i in range(len(epoch_plosses)):
@@ -483,7 +480,7 @@ for epoch in range(start_epoch, num_epochs):
         deepspeed.comm.all_reduce(loss_i, op=deepspeed.comm.ReduceOp.AVG)
         loss_i = loss_i.item()
         if global_rank == 0:
-            wandb.log({f"test/epochploss_{i}": loss_i})
+            # wandb.log({f"test/epochploss_{i}": loss_i})
             print(f"Test Epoch [{epoch + 1}/{num_epochs}], position {i}, pLoss: {loss_i:.2f}")
     # clear out the redundance cahce after each step
     torch.cuda.empty_cache()

@@ -25,8 +25,8 @@
         "params": {
             "warmup_min_lr": 0,
             "warmup_max_lr": 5e-5,
-            "warmup_num_steps": 12000,
-            "total_num_steps": 800000
+            "warmup_num_steps": 78,
+            "total_num_steps": 780
         }
     },
     "zero_optimization": {
@@ -39,9 +39,9 @@
         "reduce_bucket_size": 2e8,
         "contiguous_gradients": true
     },
-    "gradient_accumulation_steps": 2,
+    "gradient_accumulation_steps": 1,
     "gradient_clipping": 0.5,
-    "steps_per_print": 2000,
-    "train_micro_batch_size_per_gpu": 1,
+    "steps_per_print": 100,
+    "train_micro_batch_size_per_gpu": 8,
     "wall_clock_breakdown": false
 }

@@ -551,8 +551,11 @@ class Model(nn.Module):
             dataset = dataset['train']
             # dataset = dataset.select(range(96))
             original_columns1 = dataset.column_names
-            num_proc = 2
+            num_proc = 1
 
+            # Extract values to avoid pickling self in multiprocessing
+            model_type = self.model_type
+            max_len = self.train_config['max_len']
 
             # Helper function for Qwen2/Qwen3 loss mask generation
             def build_input_mask_qwen(tokenizer, messages):
@@ -594,7 +597,6 @@ class Model(nn.Module):
                     "input_ids": [],
                     "loss_mask": []
                 }
-                model_type = self.model_type
 
                 for i in range(len(examples['id'])):
                     # Parse messages (support both ShareGPT and OpenAI format)
@@ -628,7 +630,7 @@ class Model(nn.Module):
                     # Build input_ids and loss_mask based on model type
                     if model_type in ["qwen2", "qwen3"]:
                         input_ids_list, loss_mask_list = build_input_mask_qwen(tokenizer, messages)
-                        if len(input_ids_list) > self.train_config.max_len:
+                        if len(input_ids_list) > max_len:
                             continue
                         if len(input_ids_list) == 0:
                             continue
@@ -642,7 +644,7 @@ class Model(nn.Module):
                         if not tokenizer.pad_token_id:
                             tokenizer.pad_token_id = tokenizer.unk_token_id
                         input_ids = tokenizer(conversation, return_tensors="pt", add_special_tokens=False).input_ids[0]
-                        if len(input_ids) > self.train_config.max_len:
+                        if len(input_ids) > max_len:
                             continue
                         loss_mask = torch.ones_like(input_ids)
 
@@ -880,10 +882,7 @@ class Model(nn.Module):
                 target_p = nn.Softmax(dim=2)(target_head)
                 target_p = target_p.detach()
 
-
-
             hidden_states = hidden_states_out
-
             hidden_states_out = self.norm(hidden_states_out)
 
             logits = self.lm_head(hidden_states_out)
