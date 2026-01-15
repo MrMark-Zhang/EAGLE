@@ -492,7 +492,7 @@ class Model(nn.Module):
         else:
             dschf = None
         self.midlayer = LlamaDecoderLayeremb(config)
-        self.gradient_checkpointing = self.train_config.get("gradient_checkpoint", False) if isinstance(self.train_config, dict) else self.train_config.gradient_checkpointing
+        self.gradient_checkpointing = self.train_config.gradient_checkpointing
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.hidden_size = config.hidden_size
@@ -551,8 +551,7 @@ class Model(nn.Module):
             dataset = dataset['train']
             # dataset = dataset.select(range(96))
             original_columns1 = dataset.column_names
-            num_proc = 1
-
+            num_proc = 48
             # Extract values to avoid pickling self in multiprocessing
             model_type = self.model_type
             max_len = self.train_config['max_len']
@@ -648,32 +647,47 @@ class Model(nn.Module):
                             continue
                         loss_mask = torch.ones_like(input_ids)
 
-                        sep = "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
-                        sep2 = "<|eot_id|><|start_header_id|>user<|end_header_id|>"
-                        turns = conversation.split(sep2)
-                        turns[1] = turns[0] + sep2 + turns[1]
-                        turns = turns[1:]
+                    sep = "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
 
-                        cur_len = 1
-                        loss_mask[:cur_len] = 0
-                        for idx, turn in enumerate(turns):
-                            if turn == "":
-                                break
-                            turn_len = len(tokenizer(turn).input_ids)
-                            parts = turn.split(sep)
-                            if len(parts) != 2:
-                                break
-                            parts[0] += sep
-                            instruction_len = len(tokenizer(parts[0]).input_ids) - 1
-                            if idx == 0:
-                                loss_mask[cur_len: cur_len + instruction_len - 2] = 0
-                            else:
-                                loss_mask[cur_len - 3: cur_len + instruction_len + 1] = 0
-                            cur_len += turn_len
-                            if idx != 0:
-                                cur_len += 3
-                        loss_mask[cur_len:] = 0
+                    total_len = len(input_ids)
 
+                    sep2 = "<|eot_id|><|start_header_id|>user<|end_header_id|>"
+                    turns = conversation.split(sep2)
+
+                    turns[1] = turns[0] + sep2 + turns[1]
+                    turns = turns[1:]
+
+                    cur_len = 1
+                    loss_mask[:cur_len] = 0
+                    for i, turn in enumerate(turns):
+                        if turn == "":
+                            break
+                        turn_len = len(tokenizer(turn).input_ids)
+
+                        parts = turn.split(sep)
+                        if len(parts) != 2:
+                            break
+                        parts[0] += sep
+                        # "-2" is hardcoded for the Llama tokenizer to make the offset correct.
+                        instruction_len = len(tokenizer(parts[0]).input_ids) - 1
+
+                        # Ignore the user instructions
+                        if i == 0:
+                            loss_mask[cur_len: cur_len + instruction_len - 2] = 0
+                        else:
+                            loss_mask[cur_len - 3: cur_len + instruction_len + 1] = 0
+                        cur_len += turn_len
+                        if i != 0:
+                            cur_len += 3
+                        # cur_len+=2
+
+                        # if i != 0 and not tokenizer.legacy:
+                        #     # The legacy and non-legacy modes handle special tokens differently
+                        #     cur_len -= 1
+
+                    loss_mask[cur_len:] = 0
+
+                    # new_examples["conversation"].append(conversation)
                     new_examples["input_ids"].append(input_ids[None, :])
                     new_examples["loss_mask"].append(loss_mask[None, :])
 
@@ -882,7 +896,10 @@ class Model(nn.Module):
                 target_p = nn.Softmax(dim=2)(target_head)
                 target_p = target_p.detach()
 
+
+
             hidden_states = hidden_states_out
+
             hidden_states_out = self.norm(hidden_states_out)
 
             logits = self.lm_head(hidden_states_out)

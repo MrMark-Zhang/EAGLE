@@ -41,7 +41,7 @@ from transformers.modeling_outputs import (
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
-from transformers.utils import auto_docstring, can_return_tuple, logging
+from transformers.utils import LossKwargs, auto_docstring, can_return_tuple, logging
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 
 
@@ -581,7 +581,6 @@ class Qwen3Model(Qwen3PreTrainedModel):
         for idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             if idx==len(self.layers)-3 or idx==len(self.layers)//2 or idx==2:
                 all_hidden_states += (hidden_states,)
-                
             past_key_value = (
                 past_key_values[idx] if past_key_values is not None else None
             )
@@ -605,8 +604,9 @@ class Qwen3Model(Qwen3PreTrainedModel):
 
         hidden_states = self.norm(hidden_states)
 
-        # [MODIFIED] Hidden states already collected at specific layers for EAGLE3
-        # No need to add final hidden states here
+        # add hidden states from the last decoder layer
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
 
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
@@ -616,7 +616,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
         )
 
 
-class KwargsForCausalLM(FlashAttentionKwargs): ...
+class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
 
 
 @auto_docstring
